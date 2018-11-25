@@ -1,84 +1,57 @@
-import React, { Component, createContext } from "react";
-import { Machine } from "xstate";
+import React from "react";
 
-import Login from "./Login";
-import Dashboard from "./Dashboard";
+import fetchJsonp from "fetch-jsonp";
 
 import "./App.css";
 
-const appMachine = Machine({
-  initial: "loggedOut",
-  states: {
-    loggedOut: {
-      onEntry: ["error"],
-      on: {
-        SUBMIT: "loading"
-      }
-    },
-    loading: {
-      on: {
-        SUCCESS: "loggedIn",
-        FAIL: "loggedOut"
-      }
-    },
-    loggedIn: {
-      onEntry: ["setUser"],
-      onExit: ["unsetUser"],
-      on: {
-        LOGOUT: "loggedOut"
-      }
-    }
+const galleryMachine = {
+  start: {
+    SEARCH: "loading"
+  },
+  loading: {
+    SEARCH_SUCCESS: "gallery",
+    SEARCH_FAILURE: "error",
+    CANCEL_SEARCH: "gallery"
+  },
+  error: {
+    SEARCH: "loading"
+  },
+  gallery: {
+    SEARCH: "loading",
+    SELECT_PHOTO: "photo"
+  },
+  photo: {
+    EXIT_PHOTO: "gallery"
   }
-});
+};
 
-export const Auth = createContext({
-  authState: "login",
-  logout: () => {},
-  user: {}
-});
+class App extends React.Component {
+  constructor() {
+    super();
 
-class App extends Component {
-  constructor(props) {
-    super(props);
     this.state = {
-      authState: appMachine.initialState.value,
-      error: "",
-      logout: e => this.logout(e),
-      user: {}
+      gallery: "start", // finite state
+      query: "",
+      items: []
     };
   }
 
-  transition(event) {
-    const nextAuthState = appMachine.transition(
-      this.state.authState,
-      event.type
-    );
-    const nextState = nextAuthState.actions.reduce(
-      (state, action) => this.command(action, event) || state,
-      undefined
-    );
-    this.setState({
-      authState: nextAuthState.value,
-      ...nextState
-    });
-  }
-
-  command(action, event) {
-    switch (action) {
-      case "setUser":
-        if (event.username) {
-          return { user: { name: event.username } };
+  command(nextState, action) {
+    switch (nextState) {
+      case "loading":
+        // execute the search command
+        this.search(action.query);
+        break;
+      case "gallery":
+        if (action.items) {
+          // update the state with the found items
+          return { items: action.items };
         }
         break;
-      case "unsetUser":
-        return {
-          user: {}
-        };
-      case "error":
-        if (event.error) {
-          return {
-            error: event.error
-          };
+      case "photo":
+        if (action.item) {
+          // update the state with the selected photo item
+          return { photo: action.item };
         }
         break;
       default:
@@ -86,23 +59,132 @@ class App extends Component {
     }
   }
 
-  logout(e) {
-    e.preventDefault();
-    this.transition({ type: "LOGOUT" });
+  transition(action) {
+    const currentGalleryState = this.state.gallery;
+    const nextGalleryState = galleryMachine[currentGalleryState][action.type];
+
+    if (nextGalleryState) {
+      const nextState = this.command(nextGalleryState, action);
+
+      this.setState({
+        gallery: nextGalleryState,
+        ...nextState
+      });
+    }
   }
 
-  render() {
+  handleSubmit(e) {
+    e.persist();
+    e.preventDefault();
+
+    this.transition({ type: "SEARCH", query: this.state.query });
+  }
+
+  search(query) {
+    const encodedQuery = encodeURIComponent(query);
+
+    setTimeout(() => {
+      fetchJsonp(
+        `https://api.flickr.com/services/feeds/photos_public.gne?lang=en-us&format=json&tags=${encodedQuery}`,
+        { jsonpCallback: "jsoncallback" }
+      )
+        .then(res => res.json())
+        .then(data => {
+          this.transition({ type: "SEARCH_SUCCESS", items: data.items });
+        })
+        .catch(error => {
+          this.transition({ type: "SEARCH_FAILURE" });
+        });
+    }, 1000);
+  }
+  handleChangeQuery(value) {
+    this.setState({ query: value });
+  }
+  renderForm(state) {
+    const searchText =
+      {
+        loading: "Searching...",
+        error: "Try search again",
+        start: "Search"
+      }[state] || "Search";
+
     return (
-      <Auth.Provider value={this.state}>
-        <div className="w5">
-          <div className="mb2">{this.state.error}</div>
-          {this.state.authState === "loggedIn" ? (
-            <Dashboard />
-          ) : (
-            <Login transition={event => this.transition(event)} />
+      <form className="ui-form" onSubmit={e => this.handleSubmit(e)}>
+        <input
+          type="search"
+          className="ui-input"
+          value={this.state.query}
+          onChange={e => this.handleChangeQuery(e.target.value)}
+          placeholder="Search Flickr for photos..."
+          disabled={state === "loading"}
+        />
+        <div className="ui-buttons">
+          <button className="ui-button" disabled={state === "loading"}>
+            {searchText}
+          </button>
+          {state === "loading" && (
+            <button
+              className="ui-button"
+              type="button"
+              onClick={() => this.transition({ type: "CANCEL_SEARCH" })}
+            >
+              Cancel
+            </button>
           )}
         </div>
-      </Auth.Provider>
+      </form>
+    );
+  }
+  renderGallery(state) {
+    return (
+      <section className="ui-items" data-state={state}>
+        {state === "error" ? (
+          <span className="ui-error">Uh oh, search failed.</span>
+        ) : (
+          this.state.items.map((item, i) => (
+            <img
+              alt={item.title}
+              src={item.media.m}
+              className="ui-item"
+              style={{ "--i": i }}
+              key={item.link}
+              onClick={() =>
+                this.transition({
+                  type: "SELECT_PHOTO",
+                  item
+                })
+              }
+            />
+          ))
+        )}
+      </section>
+    );
+  }
+  renderPhoto(state) {
+    if (state !== "photo") return;
+
+    return (
+      <section
+        className="ui-photo-detail"
+        onClick={() => this.transition({ type: "EXIT_PHOTO" })}
+      >
+        <img
+          alt={this.state.photo.title}
+          src={this.state.photo.media.m}
+          className="ui-photo"
+        />
+      </section>
+    );
+  }
+  render() {
+    const galleryState = this.state.gallery;
+
+    return (
+      <div className="ui-app" data-state={galleryState}>
+        {this.renderForm(galleryState)}
+        {this.renderGallery(galleryState)}
+        {this.renderPhoto(galleryState)}
+      </div>
     );
   }
 }
