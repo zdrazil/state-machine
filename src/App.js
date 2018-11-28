@@ -1,54 +1,90 @@
 import React from "react";
+import { Machine } from "xstate";
+import { interpret } from "xstate/lib/interpreter";
 
 import fetchJsonp from "fetch-jsonp";
 
 import "./App.css";
 
-const galleryMachine = {
-  start: {
-    SEARCH: "loading"
-  },
-  loading: {
-    SEARCH_SUCCESS: "gallery",
-    SEARCH_FAILURE: "error",
-    CANCEL_SEARCH: "gallery"
-  },
-  error: {
-    SEARCH: "loading"
-  },
-  gallery: {
-    SEARCH: "loading",
-    SELECT_PHOTO: "photo"
-  },
-  photo: {
-    EXIT_PHOTO: "gallery"
+const galleryMachine = Machine({
+  id: "gallery",
+  initial: "start",
+  states: {
+    start: {
+      on: {
+        SEARCH: "loading"
+      }
+    },
+    loading: {
+      onEntry: ["fetchQuery"],
+      on: {
+        SEARCH_SUCCESS: "gallery",
+        SEARCH_FAILURE: "error",
+        CANCEL_SEARCH: "gallery"
+      }
+    },
+    error: {
+      on: {
+        SEARCH: "loading"
+      }
+    },
+    gallery: {
+      onEntry: ["setItems"],
+      on: {
+        SEARCH: "loading",
+        SELECT_PHOTO: "photo"
+      }
+    },
+    photo: {
+      onEntry: ["setPhoto"],
+      on: { EXIT_PHOTO: "gallery" }
+    }
   }
-};
+});
 
 class App extends React.Component {
   constructor() {
     super();
 
     this.state = {
-      gallery: "start", // finite state
+      gallery: galleryMachine.initialState,
       query: "",
       items: []
     };
   }
 
-  command(nextState, action) {
-    switch (nextState) {
-      case "loading":
+  service = interpret(galleryMachine).onTransition(nextState => {
+    const { actions } = nextState;
+    actions.forEach(action => {
+      // If the action is executable, execute it
+      this.command(action.type);
+    });
+
+    this.setState({ gallery: nextState });
+  });
+
+  componentDidMount() {
+    this.service.start();
+  }
+
+  componentWillUnmount() {
+    this.service.stop();
+  }
+
+  command(action) {
+    switch (action) {
+      case "fetchQuery":
         // execute the search command
-        this.search(action.query);
+        this.search(this.state.query);
         break;
-      case "gallery":
+      case "setItems":
+        // NOT USED
         if (action.items) {
           // update the state with the found items
           return { items: action.items };
         }
         break;
-      case "photo":
+      case "setPhoto":
         if (action.item) {
           // update the state with the selected photo item
           return { photo: action.item };
@@ -77,12 +113,15 @@ class App extends React.Component {
     e.persist();
     e.preventDefault();
 
-    this.transition({ type: "SEARCH", query: this.state.query });
+    this.setState({
+      query: this.state.query
+    });
+    this.service.send({ type: "SEARCH" });
   }
 
   search(query) {
     const encodedQuery = encodeURIComponent(query);
-
+    console.log(query);
     setTimeout(() => {
       fetchJsonp(
         `https://api.flickr.com/services/feeds/photos_public.gne?lang=en-us&format=json&tags=${encodedQuery}`,
@@ -90,16 +129,20 @@ class App extends React.Component {
       )
         .then(res => res.json())
         .then(data => {
-          this.transition({ type: "SEARCH_SUCCESS", items: data.items });
+          this.setState({
+            items: data.items
+          });
+          this.service.send({ type: "SEARCH_SUCCESS" });
         })
         .catch(error => {
-          this.transition({ type: "SEARCH_FAILURE" });
+          this.service.send({ type: "SEARCH_FAILURE" });
         });
     }, 1000);
   }
   handleChangeQuery(value) {
     this.setState({ query: value });
   }
+
   renderForm(state) {
     const searchText =
       {
@@ -126,7 +169,7 @@ class App extends React.Component {
             <button
               className="ui-button"
               type="button"
-              onClick={() => this.transition({ type: "CANCEL_SEARCH" })}
+              onClick={() => this.service.send({ type: "CANCEL_SEARCH" })}
             >
               Cancel
             </button>
@@ -135,6 +178,7 @@ class App extends React.Component {
       </form>
     );
   }
+
   renderGallery(state) {
     return (
       <section className="ui-items" data-state={state}>
@@ -148,25 +192,26 @@ class App extends React.Component {
               className="ui-item"
               style={{ "--i": i }}
               key={item.link}
-              onClick={() =>
-                this.transition({
-                  type: "SELECT_PHOTO",
-                  item
-                })
-              }
+              onClick={() => {
+                this.setState({ item });
+                this.service.send({
+                  type: "SELECT_PHOTO"
+                });
+              }}
             />
           ))
         )}
       </section>
     );
   }
+
   renderPhoto(state) {
     if (state !== "photo") return;
 
     return (
       <section
         className="ui-photo-detail"
-        onClick={() => this.transition({ type: "EXIT_PHOTO" })}
+        onClick={() => this.service.send({ type: "EXIT_PHOTO" })}
       >
         <img
           alt={this.state.photo.title}
@@ -178,12 +223,14 @@ class App extends React.Component {
   }
   render() {
     const galleryState = this.state.gallery;
+    const { send } = this.service;
+    console.log(this.state);
 
     return (
-      <div className="ui-app" data-state={galleryState}>
-        {this.renderForm(galleryState)}
-        {this.renderGallery(galleryState)}
-        {this.renderPhoto(galleryState)}
+      <div className="ui-app" data-state={galleryState.value}>
+        {this.renderForm(galleryState.value)}
+        {this.renderGallery(galleryState.value)}
+        {this.renderPhoto(galleryState.value)}
       </div>
     );
   }
